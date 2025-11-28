@@ -1,10 +1,11 @@
 import streamlit as st
 import joblib
-import pandas as pd
+import pickle
 import numpy as np
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
-import warnings
-warnings.filterwarnings('ignore')
+import pandas as pd
+from datetime import datetime
+import plotly.graph_objects as go
+from pathlib import Path
 
 # Page configuration
 st.set_page_config(
@@ -14,235 +15,244 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom styling
-st.markdown("""
-    <style>
-    .main {
-        padding: 2rem;
-    }
-    .stMetric {
-        background-color: #f0f2f6;
-        padding: 1rem;
-        border-radius: 0.5rem;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+st.title("🔍 Cloud VM Anomaly Detection System")
+st.markdown("Real-time anomaly detection using HistogramGradientBoosting model")
+st.markdown("---")
 
 # Load the model
 @st.cache_resource
 def load_model():
-    model = joblib.load('best_pipeline_histgb.joblib')
-    return model
+    try:
+        # Try loading from joblib first (lighter)
+        model_path = Path('best_pipeline_histgb.joblib')
+        if model_path.exists():
+            model = joblib.load(model_path)
+            st.sidebar.success("✅ Model loaded from joblib")
+            return model
+        
+        # Fallback to pickle
+        model_path = Path('best_pipeline_histgb.pkl')
+        if model_path.exists():
+            with open(model_path, 'rb') as f:
+                model = pickle.load(f)
+            st.sidebar.success("✅ Model loaded from pickle")
+            return model
+            
+    except Exception as e:
+        st.error(f"❌ Error loading model: {e}")
+        return None
 
-pipeline = load_model()
+model = load_model()
 
-# Title and description
-st.title("🔍 Cloud VM Anomaly Detection")
-st.markdown("""
-This application uses a **HistGradientBoostingClassifier** machine learning model 
-to detect anomalies in cloud virtual machine operations. Simply input the cloud metrics 
-below and the model will predict whether the VM behavior is **normal** or **anomalous**.
-""")
+if model is None:
+    st.error("❌ Model file not found. Please ensure 'best_pipeline_histgb.joblib' or 'best_pipeline_histgb.pkl' is in the same directory.")
+    st.stop()
 
-# Display model performance metrics
-with st.expander("📊 Model Performance Metrics", expanded=False):
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("ROC-AUC Score", "0.8034", "↑ High")
-    with col2:
-        st.metric("PR-AUC Score", "0.7149", "↑ Good")
-    st.info("The model was trained on cloud VM operational metrics to identify anomalous behavior patterns.")
+# Define feature names based on your training data
+NUMERIC_FEATURES = [
+    'cpu_usage', 'memory_usage', 'network_traffic',
+    'power_consumption', 'num_executed_instructions',
+    'execution_time', 'energy_efficiency'
+]
 
-# Sidebar for user inputs
-st.sidebar.header("📝 Input Cloud Metrics")
-st.sidebar.markdown("Enter the cloud VM operational metrics below:")
+CATEGORICAL_FEATURES = [
+    'task_type', 'task_priority', 'task_status'
+]
 
-# Numeric inputs
-st.sidebar.subheader("Numeric Metrics")
-cpu_usage = st.sidebar.slider(
-    "CPU Usage (%)",
-    min_value=0.0,
-    max_value=100.0,
-    value=50.0,
-    step=1.0,
-    help="CPU utilization percentage"
+ALL_FEATURES = NUMERIC_FEATURES + CATEGORICAL_FEATURES
+
+# Sidebar for user input
+st.sidebar.header("⚙️ Configuration")
+input_method = st.sidebar.radio(
+    "Select input method:",
+    ["Manual Input", "CSV Upload", "Sample Data"]
 )
 
-memory_usage = st.sidebar.slider(
-    "Memory Usage (%)",
-    min_value=0.0,
-    max_value=100.0,
-    value=50.0,
-    step=1.0,
-    help="Memory utilization percentage"
-)
+input_data_df = None
 
-network_traffic = st.sidebar.slider(
-    "Network Traffic (Mbps)",
-    min_value=0.0,
-    max_value=1000.0,
-    value=100.0,
-    step=10.0,
-    help="Network traffic in megabits per second"
-)
+if input_method == "Manual Input":
+    st.sidebar.subheader("📊 Enter Feature Values")
+    
+    # Numeric inputs
+    numeric_values = {}
+    for feature in NUMERIC_FEATURES:
+        numeric_values[feature] = st.sidebar.slider(
+            f"{feature.replace('_', ' ').title()}",
+            min_value=0.0,
+            max_value=1000.0,
+            value=50.0,
+            step=1.0
+        )
+    
+    # Categorical inputs
+    categorical_values = {}
+    categorical_values['task_type'] = st.sidebar.selectbox(
+        "Task Type",
+        options=['compute', 'io', 'network']
+    )
+    categorical_values['task_priority'] = st.sidebar.selectbox(
+        "Task Priority",
+        options=['low', 'medium', 'high']
+    )
+    categorical_values['task_status'] = st.sidebar.selectbox(
+        "Task Status",
+        options=['running', 'waiting', 'completed']
+    )
+    
+    # Combine all values
+    all_values = {**numeric_values, **categorical_values}
+    input_data_df = pd.DataFrame([all_values])
+    
+    # Display the input data
+    st.subheader("📋 Your Input Data")
+    st.dataframe(input_data_df, use_container_width=True)
+    
+elif input_method == "CSV Upload":
+    st.sidebar.subheader("📂 Upload CSV File")
+    uploaded_file = st.sidebar.file_uploader("Choose a CSV file", type="csv")
+    
+    if uploaded_file is not None:
+        input_data_df = pd.read_csv(uploaded_file)
+        st.write("✅ Uploaded Data Preview:")
+        st.dataframe(input_data_df.head(10), use_container_width=True)
+    else:
+        st.sidebar.warning("⚠️ Please upload a CSV file")
+        
+else:  # Sample Data
+    st.sidebar.subheader("🎲 Sample Data")
+    num_samples = st.sidebar.slider("Number of samples", 1, 20, 5)
+    
+    # Generate realistic sample data
+    np.random.seed(42)
+    sample_data = {
+        'cpu_usage': np.random.uniform(0, 100, num_samples),
+        'memory_usage': np.random.uniform(0, 100, num_samples),
+        'network_traffic': np.random.uniform(0, 1000, num_samples),
+        'power_consumption': np.random.uniform(0, 500, num_samples),
+        'num_executed_instructions': np.random.uniform(0, 10000, num_samples),
+        'execution_time': np.random.uniform(0, 100, num_samples),
+        'energy_efficiency': np.random.uniform(0, 1, num_samples),
+        'task_type': np.random.choice(['compute', 'io', 'network'], num_samples),
+        'task_priority': np.random.choice(['low', 'medium', 'high'], num_samples),
+        'task_status': np.random.choice(['running', 'waiting', 'completed'], num_samples)
+    }
+    input_data_df = pd.DataFrame(sample_data)
+    st.write("📊 Sample Data:")
+    st.dataframe(input_data_df, use_container_width=True)
 
-power_consumption = st.sidebar.slider(
-    "Power Consumption (W)",
-    min_value=0.0,
-    max_value=500.0,
-    value=100.0,
-    step=5.0,
-    help="Power consumption in watts"
-)
-
-num_executed_instructions = st.sidebar.slider(
-    "Number of Executed Instructions (millions)",
-    min_value=0.0,
-    max_value=1000.0,
-    value=100.0,
-    step=10.0,
-    help="Number of CPU instructions executed (in millions)"
-)
-
-execution_time = st.sidebar.slider(
-    "Execution Time (ms)",
-    min_value=0.0,
-    max_value=10000.0,
-    value=100.0,
-    step=50.0,
-    help="Task execution time in milliseconds"
-)
-
-energy_efficiency = st.sidebar.slider(
-    "Energy Efficiency (MIPS/W)",
-    min_value=0.0,
-    max_value=100.0,
-    value=10.0,
-    step=0.5,
-    help="Million instructions per second per watt"
-)
-
-# Categorical inputs
-st.sidebar.subheader("Task Information")
-task_type = st.sidebar.selectbox(
-    "Task Type",
-    options=["Web Server", "Database", "Compute", "Storage"],
-    help="Type of task running on the VM"
-)
-
-task_priority = st.sidebar.selectbox(
-    "Task Priority",
-    options=["Low", "Medium", "High"],
-    help="Priority level of the task"
-)
-
-task_status = st.sidebar.selectbox(
-    "Task Status",
-    options=["Running", "Idle", "Waiting"],
-    help="Current status of the task"
-)
-
-# Create a dataframe with user inputs
-input_data = pd.DataFrame({
-    'cpuusage': [cpu_usage],
-    'memoryusage': [memory_usage],
-    'networktraffic': [network_traffic],
-    'powerconsumption': [power_consumption],
-    'numexecutedinstructions': [num_executed_instructions],
-    'executiontime': [execution_time],
-    'energyefficiency': [energy_efficiency],
-    'tasktype': [task_type],
-    'taskpriority': [task_priority],
-    'taskstatus': [task_status]
-})
-
-# Display input summary
-with st.expander("📋 Input Summary", expanded=True):
-    st.dataframe(input_data, use_container_width=True)
-
-# Make prediction
-if st.button("🚀 Predict Anomaly", type="primary", use_container_width=True):
-    with st.spinner("Analyzing cloud metrics..."):
+# Prediction section
+if st.button("🚀 Run Anomaly Detection", key="predict"):
+    if input_data_df is not None and len(input_data_df) > 0:
         try:
-            # Make prediction
-            prediction = pipeline.predict(input_data)[0]
-            prediction_proba = pipeline.predict_proba(input_data)[0]
+            st.info("⏳ Running predictions...")
+            
+            # Make predictions
+            predictions = model.predict(input_data_df)
+            
+            # Get prediction probabilities
+            try:
+                anomaly_probs = model.predict_proba(input_data_df)[:, 1]
+            except:
+                anomaly_probs = predictions.astype(float)
             
             # Display results
-            st.success("✅ Prediction Complete!")
+            st.subheader("📊 Detection Results")
             
-            # Create three columns for results
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
             
             with col1:
-                if prediction == 0:
-                    st.metric(
-                        "Status",
-                        "🟢 NORMAL",
-                        "No anomaly detected"
-                    )
-                else:
-                    st.metric(
-                        "Status",
-                        "🔴 ANOMALOUS",
-                        "Anomaly detected!"
-                    )
+                normal_count = np.sum(predictions == 0)
+                st.metric("✅ Normal", normal_count)
             
             with col2:
-                confidence = max(prediction_proba) * 100
-                st.metric(
-                    "Confidence",
-                    f"{confidence:.2f}%",
-                    "Prediction confidence"
-                )
+                anomaly_count = np.sum(predictions == 1)
+                st.metric("⚠️ Anomalies", anomaly_count)
             
             with col3:
-                normal_prob = prediction_proba[0] * 100
-                st.metric(
-                    "Normal Probability",
-                    f"{normal_prob:.2f}%",
-                    "Likelihood of normal behavior"
-                )
+                anomaly_rate = (anomaly_count / len(predictions)) * 100 if len(predictions) > 0 else 0
+                st.metric("🔴 Anomaly Rate", f"{anomaly_rate:.1f}%")
             
-            # Display probability distribution
-            st.subheader("📈 Prediction Probabilities")
-            prob_data = pd.DataFrame({
-                'Classification': ['Normal', 'Anomalous'],
-                'Probability': [prediction_proba[0], prediction_proba[1]]
+            with col4:
+                avg_confidence = np.mean(anomaly_probs)
+                st.metric("📈 Avg Confidence", f"{avg_confidence:.3f}")
+            
+            # Results table
+            st.subheader("📋 Detailed Results")
+            results_df = pd.DataFrame({
+                'Sample': range(len(predictions)),
+                'Prediction': ['⚠️ Anomaly' if p == 1 else '✅ Normal' for p in predictions],
+                'Confidence': np.round(anomaly_probs * 100, 2),
+                'Risk Level': ['🔴 High' if prob > 0.7 else '🟡 Medium' if prob > 0.4 else '🟢 Low' for prob in anomaly_probs]
             })
-            st.bar_chart(prob_data.set_index('Classification'), use_container_width=True)
+            st.dataframe(results_df, use_container_width=True)
             
-            # Display detailed metrics
-            st.subheader("📊 Input Metrics Summary")
+            # Visualization
+            st.subheader("📈 Visualizations")
+            
             col1, col2 = st.columns(2)
             
             with col1:
-                st.write("**Numeric Metrics:**")
-                numeric_summary = pd.DataFrame({
-                    'Metric': ['CPU Usage', 'Memory Usage', 'Network Traffic', 'Power Consumption', 
-                              'Executed Instructions', 'Execution Time', 'Energy Efficiency'],
-                    'Value': [f"{cpu_usage}%", f"{memory_usage}%", f"{network_traffic} Mbps", 
-                             f"{power_consumption} W", f"{num_executed_instructions}M", 
-                             f"{execution_time} ms", f"{energy_efficiency} MIPS/W"]
-                })
-                st.dataframe(numeric_summary, use_container_width=True)
+                # Classification distribution
+                fig = go.Figure(data=[
+                    go.Bar(
+                        x=['✅ Normal', '⚠️ Anomaly'],
+                        y=[normal_count, anomaly_count],
+                        marker_color=['green', 'red']
+                    )
+                ])
+                fig.update_layout(
+                    title="Sample Classification",
+                    xaxis_title="Classification",
+                    yaxis_title="Count",
+                    height=400
+                )
+                st.plotly_chart(fig, use_container_width=True)
             
             with col2:
-                st.write("**Task Information:**")
-                task_summary = pd.DataFrame({
-                    'Property': ['Task Type', 'Task Priority', 'Task Status'],
-                    'Value': [task_type, task_priority, task_status]
-                })
-                st.dataframe(task_summary, use_container_width=True)
-                
+                # Confidence distribution
+                fig = go.Figure(data=[
+                    go.Histogram(
+                        x=anomaly_probs,
+                        nbinsx=20,
+                        marker_color='indianred'
+                    )
+                ])
+                fig.update_layout(
+                    title="Anomaly Probability Distribution",
+                    xaxis_title="Anomaly Probability",
+                    yaxis_title="Frequency",
+                    height=400
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+            # Feature values heatmap
+            if len(input_data_df) > 0:
+                st.subheader("🔥 Feature Heatmap")
+                numeric_df = input_data_df[NUMERIC_FEATURES].head(10)
+                fig = go.Figure(data=go.Heatmap(
+                    z=numeric_df.values,
+                    x=numeric_df.columns,
+                    y=[f"Sample {i}" for i in range(len(numeric_df))],
+                    colorscale='Viridis'
+                ))
+                fig.update_layout(height=300)
+                st.plotly_chart(fig, use_container_width=True)
+            
+            st.success("✅ Detection complete!")
+            
         except Exception as e:
-            st.error(f"❌ Prediction failed: {str(e)}")
-            st.info("Please ensure the model file is uploaded correctly.")
+            st.error(f"❌ Error during prediction: {e}")
+            st.error(f"Details: {str(e)}")
+    else:
+        st.warning("⚠️ Please provide input data")
 
-# Footer
-st.markdown("---")
-st.markdown("""
-    <div style='text-align: center; color: gray; font-size: 0.8em;'>
-    Cloud Anomaly Detection System | Powered by HistGradientBoostingClassifier | ML Model v1.0
-    </div>
-    """, unsafe_allow_html=True)
+# Model information
+st.sidebar.markdown("---")
+st.sidebar.subheader("ℹ️ Model Information")
+st.sidebar.write(f"**Model Type:** HistogramGradientBoosting")
+st.sidebar.write(f"**Test ROC-AUC:** 0.862")
+st.sidebar.write(f"**Test PR-AUC:** 0.798")
+st.sidebar.write(f"**Last Updated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+st.sidebar.markdown("---")
+st.sidebar.markdown("📖 [Streamlit Docs](https://docs.streamlit.io/)")
+st.sidebar.markdown("🤖 [Model Source](https://github.com/Omnikam3010/cloud-anomaly-detection-streamlit)")
